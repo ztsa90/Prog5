@@ -1,5 +1,5 @@
 #! /bin/bash
-#SBATCH --job-name=assignment1_trapizoid
+#SBATCH --job-name=assignment1_trapezoid
 #SBATCH --comment='Prog5 assignment1: trapezoid integrate cos(x); sweep n -> results.csv'
 
 #SBATCH --account=ZahraTaheri
@@ -11,7 +11,7 @@
 #SBATCH --mail-user=z.taheri.hanjani@st.hanze.nl
 #SBATCH --mail-type=ALL
 
-#SBATCH --time=00:3:00
+#SBATCH --time=00:03:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
