@@ -1,51 +1,56 @@
 #!/usr/bin/env python3
 """Numerical integration with the composite trapezoidal rule."""
 
-import argparse   # to read values from the command line
-import math       # for cos() and sin()
+from typing import Callable
+import argparse
+import math
 
 
-def trapezoid(f, lower, upper, n=256):
-    """Approximate the integral of f(x) from lower to upper using n steps."""
-    if n <= 0:
-        # n must be positive, otherwise step size is invalid
-        raise ValueError("n must be a positive integer.")
+def trapezoid(
+    func: Callable[[float], float],
+    lower: float,
+    upper: float,
+    num_steps: int = 256,
+) -> float:
+    """Approximate ∫_lower^upper func(x) dx using the composite trapezoid rule."""
+    if num_steps <= 0:
+        raise ValueError("num_steps must be a positive integer.")
 
-    h = (upper - lower) / n        # step size
-    I = f(lower) + f(upper)        # first and last terms
+    step = (upper - lower) / num_steps          # step size
+    total = func(lower) + func(upper)           # first and last terms
 
-    # add the middle terms, each multiplied by 2
-    for index in range(1, n):
-        I += 2 * f(lower + index * h)
+    for idx in range(1, num_steps):
+        total += 2.0 * func(lower + idx * step)
 
-    # multiply by h/2 to finish the trapezoid rule
-    return I * (h / 2)
+    return total * (step / 2.0)
 
 
-def main():
+def main() -> None:
     """Parse inputs, run the method, and print the error."""
     parser = argparse.ArgumentParser(description="Trapezoid model")
-    parser.add_argument("-a", type=float, required=True,
-                        help="lower bound of the integral")
-    parser.add_argument("-b", type=float, required=True,
-                        help="upper bound of the integral")
-    parser.add_argument("-n", type=int, required=True,
-                        help="number of steps (subintervals)")
+    parser.add_argument(
+        "-a", "--lower", type=float, required=True, help="lower bound of the integral"
+    )
+    parser.add_argument(
+        "-b", "--upper", type=float, required=True, help="upper bound of the integral"
+    )
+    parser.add_argument(
+        "-n", "--steps", type=int, required=True, help="number of steps (subintervals)"
+    )
     args = parser.parse_args()
 
-    f = math.cos  # we integrate cos(x)
-    # exact value of integral(cos(x)) from a to b is sin(b) - sin(a)
-    exact_answer = math.sin(args.b) - math.sin(args.a)
+    lower, upper, num_steps = args.lower, args.upper, args.steps
 
-    # numerical answer using our trapezoid function
-    approximate_answer = trapezoid(f, args.a, args.b, args.n)
-
-    # absolute error between exact and approximate answers
+    func = math.cos  # we integrate cos(x)
+    exact_answer = math.sin(upper) - math.sin(lower)
+    approximate_answer = trapezoid(func, lower, upper, num_steps)
     error = abs(exact_answer - approximate_answer)
 
-    # print steps and error (6 digits after the decimal point)
-    print(f"{args.n}, {error:.6f}")
+    print(f"{num_steps}, {error:.6f}")
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
