@@ -6,7 +6,7 @@ import argparse
 import math
 
 
-# The function to integrate; you can hardcode it for the assignment
+# The function to integrate
 def f(x):
     return math.sin(x)
 
@@ -22,9 +22,9 @@ def main():
     parser.add_argument("-n", type=int,   required=True, help="Number of steps (subintervals)")
     args = parser.parse_args()
 
-    a = args.a
-    b = args.b
-    n = args.n
+    a = args.a   # lower bound
+    b = args.b   # upper bound
+    n = args.n   # number of trapezoids
     # ---------------------------------------------------------------------
 
     # ---------- Initialize MPI ----------
@@ -50,7 +50,9 @@ def main():
     # Sum all local contributions on rank 0
     total = comm.reduce(local_trap, op=MPI.SUM, root=0)
 
-    # Only rank 0 prints the final result
+        # ---------- Special role of rank 0 ----------
+    # Only rank 0 (the root process) collects the final result
+    # and is responsible for printing or saving output.
     if rank == 0:
         print(f"result={total}")
 
