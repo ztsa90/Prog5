@@ -91,6 +91,11 @@ def main() -> None:
         x_val = a_val + i * h_val    # sample point x = a + i*h
         local_sum += 2.0 * f(x_val)  # internal points have weight 2
 
+    # ADDED: include left chunk boundary as an internal point (weight = 2),
+    # only when this chunk is not empty and not the global left end.
+    if local_steps > 0 and i_start > 0:                      # ADDED
+        local_sum += 2.0 * f(a_val + i_start * h_val)        # ADDED
+
     # Add contribution of endpoints if this rank owns them
     if i_start == 0:
         local_sum += f(a_val)        # add first endpoint f(a)
