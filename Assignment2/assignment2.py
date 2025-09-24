@@ -4,9 +4,9 @@ Parallel trapezoidal integration with mpi4py (fair block split).
 Assignment 2 - Prog5
 """
 
-from mpi4py import MPI              # import MPI bindings for Python
-import argparse                     # parse command-line arguments
-import math                         # math functions like sin, cos
+import argparse                     # parse command-line arguments (stdlib)
+import math                         # math functions like sin, cos (stdlib)
+from mpi4py import MPI              # MPI bindings for Python (third-party)
 
 
 def f(x_value: float) -> float:
@@ -24,7 +24,6 @@ def main() -> None:
     Each rank computes a local trapezoidal sum, then results
     are reduced (summed) at rank 0.
     """
-    
     comm = MPI.COMM_WORLD           # communicator with all processes
     rank = comm.Get_rank()          # rank ID of this process (0, 1, 2, ...)
     size = comm.Get_size()          # total number of processes (ranks)
@@ -34,9 +33,7 @@ def main() -> None:
     n_val = None
 
     if rank == 0:                   # only rank 0 reads the CLI args
-    # ---------- Parse command line arguments ----------
-
-    # -----------------------------------
+        # ---------- Parse command line arguments ----------
         parser = argparse.ArgumentParser(
             description="Trapezoidal rule with MPI (fair block split)"
         )
@@ -53,12 +50,11 @@ def main() -> None:
         n_val = args.n              # number of trapezoids (n)
     # ---------------------------------------------------
 
-   # Broadcast problem definition to all ranks (rank 0 is controller)
+    # Broadcast problem definition to all ranks (rank 0 is controller)
     a_val, b_val, n_val = comm.bcast((a_val, b_val, n_val), root=0)
     # after this line every rank has the same a_val, b_val, n_val
-  
 
-    # ---------- Initialize MPI ---------- 
+    # ---------- Initialize MPI ----------
     # (nothing else to init; communicator already set)
 
     # Step size for the trapezoidal rule
@@ -83,9 +79,9 @@ def main() -> None:
     i_end = i_start + local_steps    # end index (exclusive) for this rank
     # -----------------------------------------------------
 
-   # Main job is Integral calculation of Trapezoid:
-   # Formula: (h / 2) * [ f(a) + 2 * sum f(a + i*h) + f(b) ]
-   # Trapezoid concept: weight 1 at ends, weight 2 for internal points
+    # Main job is Integral calculation of Trapezoid:
+    # Formula: (h / 2) * [ f(a) + 2 * sum f(a + i*h) + f(b) ]
+    # Trapezoid concept: weight 1 at ends, weight 2 for internal points
 
     # local_sum stores the partial result of this rank only
     local_sum = 0.0                  # initialize local integral sum
