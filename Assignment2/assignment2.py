@@ -80,7 +80,7 @@ def main() -> None:
     # -----------------------------------------------------
 
     # Main job is Integral calculation of Trapezoid:
-    # Formula: (h / 2) * [ f(a) + 2 * sum f(a + i*h) + f(b) ]
+    # Formula: (h / 2) * [f(a) + 2 * sum f(a + i*h) + f(b)]
     # Trapezoid concept: weight 1 at ends, weight 2 for internal points
 
     # local_sum stores the partial result of this rank only
