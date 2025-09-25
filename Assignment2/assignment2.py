@@ -12,7 +12,7 @@ from mpi4py import MPI              # MPI bindings for Python (third-party)
 def f(x_value: float) -> float:
     """
     Function to integrate.
-    Here we hardcode f(x) = sin(x).
+    Here : f(x) = sin(x).
     """
     return math.sin(x_value)        # return sin(x)
 
@@ -67,13 +67,15 @@ def main() -> None:
     base = n_val // worker           # base steps per worker (minimum each gets)
     remainder = n_val % worker       # leftover steps; give 1 extra to first 'remainder' workers
 
-    local_steps = base + (1 if rank < remainder else 0)
-    # steps for THIS rank: add +1 only for the first 'remainder' ranks
-    # NOTE: this uses 'rank' directly. If rank 0 is supervisor,
-    # then worker ranks are 1..size-1, not 0..workers-1.
-
-    start_steps_before = rank * base + min(rank, remainder)
-    # number of steps before this rank’s chunk starts
+    # --- make rank 0 a pure supervisor (no compute) ---
+    if rank == 0:
+        local_steps = 0              # supervisor does not take a chunk
+        start_steps_before = 0       # no indices for rank 0
+    else:
+        worker_idx = rank - 1        # worker indices: 0..workers-1
+        local_steps = base + (1 if worker_idx < remainder else 0)
+        # start index for this worker in global indexing
+        start_steps_before = worker_idx * base + min(worker_idx, remainder)
 
     i_start = start_steps_before     # start index (inclusive) for this rank
     i_end = i_start + local_steps    # end index (exclusive) for this rank
@@ -97,9 +99,9 @@ def main() -> None:
         local_sum += 2.0 * f(a_val + i_start * h_val)        # ADDED
 
     # Add contribution of endpoints if this rank owns them
-    if i_start == 0:
+    if local_steps > 0 and i_start == 0:
         local_sum += f(a_val)        # add first endpoint f(a)
-    if i_end == n_val:
+    if local_steps > 0 and i_end == n_val:
         local_sum += f(b_val)        # add last endpoint f(b)
 
     # Local trapezoid contribution for this rank
