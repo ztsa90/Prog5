@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from math import isqrt
+import argparse
 
 def sieve_like(n: int):
     """
@@ -36,6 +37,13 @@ def sieve_like(n: int):
 
 
 if __name__ == "__main__":
-    # Test: print all prime numbers up to 100
-    print(sieve_like(100))
+    # Command line argument parsing
+    p = argparse.ArgumentParser()
+    p.add_argument("-n", type=int, required=False, default=10000,
+                   help="Find all prime numbers up to n")
+    args = p.parse_args()
 
+    primes = sieve_like(args.n)
+
+    # Print summary
+    print(f"n={args.n} primes={len(primes)}")
