@@ -1,0 +1,50 @@
+# ===== Python build & cache =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# ===== Virtual environment =====
+venv/
+.env/
+ENV/
+.venv/
+*.egg-info/
+pip-wheel-metadata/
+
+# ===== Dataset & large files =====
+*.gbff
+*.gbff.gz
+*.fna
+*.faa
+*.txt
+*.csv
+*.tsv
+*.gz
+*.zip
+*.tar
+*.tar.gz
+datasets/
+data/
+
+# ===== Sensitive / local config =====
+.my.cnf
+mysql_account.txt
+*.cnf
+
+# ===== Slurm output files =====
+*.out
+*.err
+slurm-*.out
+slurm-*.err
+
+# ===== IDE / editor settings =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== OS-generated files =====
+.DS_Store
+Thumbs.db
