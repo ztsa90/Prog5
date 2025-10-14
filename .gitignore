@@ -48,3 +48,7 @@ slurm-*.err
 # ===== OS-generated files =====
 .DS_Store
 Thumbs.db
+# Spark output files
+*.parquet
+*.snappy.parquet
+features_cleaned.parquet/
