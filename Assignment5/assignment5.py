@@ -175,8 +175,10 @@ def parse_genbank_record(record) -> List[Dict[str, object]]:
     # These are "gene" features whose locus_tag is NOT in any coding feature
     for feature in record.features:
         if feature.type == GENE_FEATURE:
-            locus_tag = feature.qualifiers.get("locus_tag", [None])[0]
-            if locus_tag and locus_tag not in coding_locus_tags:
+            lt = feature.qualifiers.get("locus_tag", [None])[0]
+            if lt is None:
+                continue
+            if lt not in coding_locus_tags:
                 add_feature_row(feature, is_coding=False, is_rna=False)
 
     return rows
