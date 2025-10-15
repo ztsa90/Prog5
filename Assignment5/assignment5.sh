@@ -17,11 +17,10 @@ echo "=========================================="
 echo
 
 # Run the PySpark analysis script on archaea.2.genomic.gbff
-# This script parses the GenBank file and performs feature analysis
 python3 assignment5.py /data/datasets/NCBI/refseq/ftp.ncbi.nlm.nih.gov/refseq/release/archaea/archaea.2.genomic.gbff
 
 # Print completion information
 echo
 echo "=========================================="
 echo "Job finished at: $(date)"
-echo "=========================================="sbatch assignment5.sh
+echo "=========================================="
