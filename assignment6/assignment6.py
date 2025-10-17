@@ -61,6 +61,8 @@ df.show(5, truncate=False)
 #    Rationale: in dbNSFP, prediction tools expose *_score, *_pred, *_rankscore, *_phred
 #    (e.g., SIFT_score, Polyphen2_HDIV_pred, REVEL_rankscore, CADD_phred, ...)
 # ---------------------------------------------------------------------
+from collections import Counter
+
 classifier_cols = [
     c for c in df.columns
     if any(suffix in c for suffix in ("_score", "_pred", "_rankscore", "_phred"))
@@ -69,17 +71,20 @@ classifier_cols = [
 print("\n🧩 Number of classifier-related columns:", len(classifier_cols))
 print("🧩 Example classifier columns:", classifier_cols[:20])
 
-# Extract the *base* classifier tool names (everything before the first underscore)
-# Examples:
-#   "SIFT_score"              -> "SIFT"
-#   "Polyphen2_HDIV_score"    -> "Polyphen2"
-#   "fathmm-MKL_coding_score" -> "fathmm-MKL"
-classifiers = sorted(set(c.split("_")[0] for c in classifier_cols))
-
+# Exact base (before first underscore)
+bases = [c.split("_", 1)[0] for c in classifier_cols]
+classifiers = sorted(set(bases))
 print(f"\n🧪 Distinct classifiers detected: {len(classifiers)}")
-print("🧪 Classifier names (first 30):", classifiers[:30])
+print("🧪 First 30 classifier bases:", classifiers[:30])
 
+# Count columns per classifier (exact-base match)
+clf_counts = Counter(bases)
+print("\n🔹 Columns per classifier (top 20):")
+for clf, n in sorted(clf_counts.items(), key=lambda x: -x[1])[:20]:
+    print(f"{clf:<20} {n} columns")
+print(f"\n✅ Total unique classifiers: {len(clf_counts)}")
 
+# or 
 # WHITELIST_CLASSIFIERS = {
 #     "SIFT", "SIFT4G", "Polyphen2", "LRT", "MutationTaster",
 #     "MutationAssessor", "FATHMM", "PROVEAN", "VEST4", "MetaSVM",
@@ -92,4 +97,4 @@ print("🧪 Classifier names (first 30):", classifiers[:30])
 
 # classifiers = [c for c in classifiers if c in WHITELIST_CLASSIFIERS]
 
-spark.stop()
+
