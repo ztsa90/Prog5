@@ -35,7 +35,6 @@ import configparser
 import logging
 import os
 import sys
-from collections import defaultdict
 from functools import reduce
 from operator import add
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -98,21 +97,25 @@ def safe_sum(cols: Sequence):  # Spark Columns
 
 def discover_classifiers(df: DataFrame) -> Dict[str, List[str]]:
     """
-    Group columns by classifier base using known suffixes.
+    Map: classifier base -> list of its columns (by known suffixes)
 
     Examples
     --------
     MetaSVM_score         -> base 'MetaSVM'
     CADD_raw_rankscore    -> base 'CADD_raw'
     """
-    mapping: Dict[str, List[str]] = defaultdict(list)
-    for col in df.columns:
+
+    clf_map: Dict[str, List[str]] = {}
+    for c in df.columns:
         for suf in PRED_SUFFIXES:
-            if col.endswith(suf):
-                base = col[: col.rfind(suf)].rstrip("_")
-                mapping[base].append(col)
+            if c.endswith(suf):
+                base = c[: -len(suf)].rstrip("_")  
+                if base not in clf_map:
+                    clf_map[base] = []
+                clf_map[base].append(c)
                 break
-    return mapping
+    return clf_map
+
 
 
 def count_non_missing(df: DataFrame, columns: Iterable[str]) -> Dict[str, int]:
