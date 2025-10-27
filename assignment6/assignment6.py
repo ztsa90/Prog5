@@ -1,239 +1,256 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Assignment 6 — Complete Solution (CORRECTED)
-Author: Z. Taherihanjani
+Assignment 6 — dbNSFP Persistence (Final)
 
-FIXES:
-1. Base name extraction: proper handling of HDIV_score vs HVAR_score
-2. Column detection: endswith() instead of 'in' to avoid false positives
-3. NULL handling: comprehensive missing value detection
-4. Robust column name detection for #chr/pos variations
-5. TRUE 3NF: unpivoted predictions table (long format)
+Pipeline:
+1) Read gzipped dbNSFP TSV
+2) Detect classifier columns by suffixes
+3) Q1: count predictions per classifier (non-missing)
+4) Keep Top-5 classifiers; drop the rest
+5) Create chr_pos key
+6) Q4/Q5: most-predicted position/protein
+7) Normalize to 3NF (positions, proteins, classifiers, predictions-long)
+8) Optional: write to MariaDB via JDBC
+9) Save assignment6.md report
+
+Run (test, dry-run):
+spark-submit --master spark://spark.bin.bioinf.nl:7077 \
+  --jars ~/jars/mariadb-java-client-3.5.0.jar \
+  assignment6.py --rows 2000 --jdbc-jar ~/jars/mariadb-java-client-3.5.0.jar
+
+Run (full + write):
+spark-submit --master spark://spark.bin.bioinf.nl:7077 \
+  --jars ~/jars/mariadb-java-client-3.5.0.jar \
+  assignment6.py --write --db-name YOUR_DB \
+  --jdbc-jar ~/jars/mariadb-java-client-3.5.0.jar
 """
 
-# =============================================================================
-# 0) Setup and imports
-# =============================================================================
-import sys
-import os
-import time
+# pylint: disable=too-many-locals,too-many-statements,too-many-branches
+
+from __future__ import annotations
+
 import argparse
 import configparser
+import logging
+import os
+import sys
 from collections import defaultdict
 from functools import reduce
 from operator import add
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+# Spark imports (BIN). In some environments pylint can't see pyspark stubs.
+# pylint: disable=import-error
 sys.path.append("/opt/spark/python")
 sys.path.append("/opt/spark/python/lib/py4j-0.10.9.7-src.zip")
-
-from pyspark.sql import SparkSession, DataFrame, functions as F
-from pyspark import StorageLevel
-
-# =============================================================================
-# 1. Constants
-# =============================================================================
-# These suffixes identify classifier columns in the dbNSFP dataset
-PRED_SUFFIXES = ("_score", "_pred", "_rankscore", "_phred")
-
-# Common missing value markers in dbNSFP
-MISSING = {".", "", "NA", "NaN", "nan", "null", "NULL"}
+from pyspark.sql import DataFrame, SparkSession  # type: ignore
+from pyspark.sql import functions as F            # type: ignore
+from pyspark import StorageLevel                  # type: ignore
 
 
-# =============================================================================
-# 2. Utility functions
-# =============================================================================
-def read_mycnf(path):
-    """Read MySQL/MariaDB credentials from ~/.my.cnf (if available)."""
+# ----------------------------- Constants -------------------------------------
+
+PRED_SUFFIXES: Tuple[str, ...] = ("_score", "_pred", "_rankscore", "_phred")
+MISSING_MARKERS: Tuple[str, ...] = (".", "", "NA", "NaN", "nan", "null", "NULL")
+
+DEFAULT_DATA = "/data/datasets/dbNSFP/snpEff/data/dbNSFP4.9a.txt.gz"
+DEFAULT_JDBC = os.path.expanduser("~/jars/mariadb-java-client-3.5.0.jar")
+DEFAULT_APPNAME = "assignment6_dbnsfp_final"
+REPORT_FILE = "assignment6.md"
+
+
+# ----------------------------- Logging ---------------------------------------
+
+def _setup_logging() -> None:
+    """Configure root logger."""
+    fmt = "%(asctime)s | %(levelname)s | %(message)s"
+    logging.basicConfig(level=logging.INFO, format=fmt)
+
+
+# ----------------------------- Helpers ---------------------------------------
+
+def read_mycnf(path: str) -> Dict[str, str]:
+    """Read MariaDB credentials from ~/.my.cnf if present."""
+    creds: Dict[str, str] = {}
     cfg = configparser.ConfigParser()
-    creds = {}
     try:
-        cfg.read(path)
+        cfg.read(path, encoding="utf-8")
         if "client" in cfg:
             if cfg.has_option("client", "user"):
                 creds["user"] = cfg.get("client", "user")
             if cfg.has_option("client", "password"):
                 creds["password"] = cfg.get("client", "password")
-    except Exception as err:
-        print(f"⚠️ Could not read {path}: {err}")
+    except Exception as exc:  # pylint: disable=broad-except
+        logging.warning("Could not read %s: %s", path, exc)
     return creds
 
 
-def safe_sum(columns):
-    """Safely sum Spark Columns (avoid empty reduce)."""
-    return reduce(add, columns) if columns else F.lit(0)
+def is_missing(colname: str):
+    """Spark Column expression for missing values."""
+    return F.col(colname).isNull() | F.col(colname).isin(list(MISSING_MARKERS))
 
 
-def is_missing(col):
-    """Return True if a value is missing (NULL, empty, or marker)."""
-    return F.col(col).isNull() | F.col(col).isin(MISSING)
+def safe_sum(cols: Sequence):  # Spark Columns
+    """Sum a list of Spark Columns safely (works for empty)."""
+    return reduce(add, cols) if cols else F.lit(0)
 
 
-def discover_classifiers(df):
+def discover_classifiers(df: DataFrame) -> Dict[str, List[str]]:
     """
-    Detect classifier columns by suffix and group them by base name.
+    Group columns by classifier base using known suffixes.
 
-    Example:
-    - 'MetaSVM_score' → base = 'MetaSVM'
-    - 'CADD_raw_rankscore' → base = 'CADD_raw'
+    Examples
+    --------
+    MetaSVM_score         -> base 'MetaSVM'
+    CADD_raw_rankscore    -> base 'CADD_raw'
     """
-    clf_map = defaultdict(list)
+    mapping: Dict[str, List[str]] = defaultdict(list)
     for col in df.columns:
         for suf in PRED_SUFFIXES:
             if col.endswith(suf):
                 base = col[: col.rfind(suf)].rstrip("_")
-                clf_map[base].append(col)
+                mapping[base].append(col)
                 break
-    return clf_map
+    return mapping
 
 
-def count_non_missing(df, columns):
-    """Count non-missing (valid) values for each column."""
-    agg_exprs = [
-        F.sum(F.when(~is_missing(c), 1).otherwise(0)).alias(c) for c in columns
-    ]
-    return df.agg(*agg_exprs).collect()[0].asDict()
+def count_non_missing(df: DataFrame, columns: Iterable[str]) -> Dict[str, int]:
+    """Count non-missing values per column, return dict[col] -> count."""
+    aggs = [F.sum(F.when(~is_missing(c), 1).otherwise(0)).alias(c) for c in columns]
+    row = df.agg(*aggs).collect()[0].asDict()
+    # cast Any to int safely
+    return {k: int(v) for k, v in row.items()}
 
 
-def find_column(df, candidates):
-    """Find the first existing column name from a list of candidates."""
-    for c in candidates:
-        if c in df.columns:
-            return c
+def find_column(df: DataFrame, candidates: Sequence[str]) -> Optional[str]:
+    """Return first matching column from candidates, else None."""
+    for name in candidates:
+        if name in df.columns:
+            return name
     return None
 
 
-def markdown_table(headers, rows):
-    """Create a Markdown table (for report generation)."""
-    h = "|" + "|".join(headers) + "|\n|" + "|".join(["---"] * len(headers)) + "|\n"
-    b = "".join("|" + "|".join(str(x) for x in r) + "|\n" for r in rows)
-    return h + b
+def md_table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
+    """Build a simple Markdown table."""
+    head = "|" + "|".join(headers) + "|\n|" + "|".join(["---"] * len(headers)) + "|\n"
+    body = "".join("|" + "|".join(str(x) for x in r) + "|\n" for r in rows)
+    return head + body
 
 
-# =============================================================================
-# 3. Main function
-# =============================================================================
-def main():
-    """Main function to execute the dbNSFP analysis."""
-    parser = argparse.ArgumentParser(description="Assignment 6 — dbNSFP Analysis")
-    parser.add_argument("--data", required=False,
-                        default="/data/datasets/dbNSFP/snpEff/data/dbNSFP4.9a.txt.gz",
-                        help="Path to dbNSFP dataset (gzipped TSV)")
-    parser.add_argument("--rows", type=int, default=2000,
-                        help="Limit rows for testing (0 = full dataset)")
-    parser.add_argument("--jdbc-jar", default=os.path.expanduser("~/jars/mariadb-java-client-3.5.0.jar"),
-                        help="Path to MariaDB JDBC driver JAR")
-    parser.add_argument("--db-name", default="", help="Database name for writing results")
-    parser.add_argument("--db-user", default="", help="Database user")
-    parser.add_argument("--db-pass", default="", help="Database password")
-    parser.add_argument("--dry-run", action="store_true", default=True,
-                        help="Dry run: skip database writing")
+# ----------------------------- CLI / Main ------------------------------------
+
+def _build_argparser() -> argparse.ArgumentParser:
+    """Create CLI parser."""
+    parser = argparse.ArgumentParser(description="Assignment 6 — dbNSFP Persistence")
+    parser.add_argument(
+        "--data", default=DEFAULT_DATA, help="Path to dbNSFP gzipped TSV"
+    )
+    parser.add_argument(
+        "--rows", type=int, default=2000, help="Row limit for testing (0 = full dataset)"
+    )
+    parser.add_argument(
+        "--jdbc-jar",
+        default=DEFAULT_JDBC,
+        help="Path to MariaDB JDBC JAR (e.g., ~/jars/mariadb-java-client-3.5.0.jar)",
+    )
+    parser.add_argument("--db-name", default="", help="Target MariaDB database name")
+    parser.add_argument("--db-user", default="", help="DB user (overrides .my.cnf)")
+    parser.add_argument("--db-pass", default="", help="DB password (overrides .my.cnf)")
+    # dry-run default True; use --write to actually write
+    parser.add_argument(
+        "--write", dest="dry_run", action="store_false", help="Write results to DB"
+    )
+    parser.set_defaults(dry_run=True)
+    return parser
+
+
+def main() -> int:
+    """Entry point for Assignment 6 pipeline."""
+    _setup_logging()
+    parser = _build_argparser()
     args = parser.parse_args()
 
-    # -------------------------------------------------------------------------
-    # 3.1 Initialize Spark
-    # -------------------------------------------------------------------------
-    print("🚀 Starting Assignment 6 Analysis...")
+    logging.info("Starting Assignment 6 (dry_run=%s) ...", args.dry_run)
+
     spark = (
         SparkSession.builder
-        .appName("assignment6_final")
+        .appName(DEFAULT_APPNAME)
         .config("spark.ui.enabled", "false")
         .config("spark.driver.memory", "8g")
         .config("spark.executor.memory", "8g")
-        .config("spark.jars", args.jdbc_jar)
-        .master("local[*]")
+        .config("spark.jars", args.jdbc_jar)  # JDBC jar on classpath
+        # NOTE: do NOT set .master() here; pass via spark-submit --master
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("ERROR")
 
-    # -------------------------------------------------------------------------
-    # 3.2 Load dataset
-    # -------------------------------------------------------------------------
-    print(f"📂 Loading dataset from {args.data}")
+    # ---------------- Load dataset ----------------
+    logging.info("Loading dataset: %s", args.data)
     df = spark.read.csv(args.data, sep="\t", header=True, inferSchema=False)
-
-    if args.rows > 0:
+    if args.rows and args.rows > 0:
         df = df.limit(args.rows)
-        print(f"⚠️ Running in TEST MODE: limited to {args.rows} rows")
+        logging.info("TEST MODE: limited to %d rows", args.rows)
 
     df.persist(StorageLevel.MEMORY_AND_DISK)
     n_rows = df.count()
     n_cols = len(df.columns)
-    print(f"✅ Loaded {n_rows:,} rows × {n_cols} columns")
+    logging.info("Loaded %s rows x %d cols", f"{n_rows:,}", n_cols)
 
-    # -------------------------------------------------------------------------
-    # 3.3 Detect classifier columns (Q1)
-    # -------------------------------------------------------------------------
+    # ---------------- Q1: classifiers ----------------
     clf_map = discover_classifiers(df)
     clf_cols = [c for cols in clf_map.values() for c in cols]
-    print(f"🔍 Found {len(clf_map)} classifiers with {len(clf_cols)} total columns")
+    logging.info("Detected %d classifiers over %d columns", len(clf_map), len(clf_cols))
 
-    # Count valid predictions per classifier
-    print("📊 Counting valid predictions per classifier...")
     counts = count_non_missing(df, clf_cols)
-    clf_totals = []
-    for clf, cols in clf_map.items():
-        clf_totals.append((clf, sum(counts.get(c, 0) for c in cols)))
-
-    q1_df = spark.createDataFrame(clf_totals, ["classifier", "predictions"])\
-                 .orderBy(F.desc("predictions"), F.asc("classifier"))
-    print("✅ Top 10 classifiers:")
+    q1_rows_py = [(base, sum(counts.get(c, 0) for c in cols))
+                  for base, cols in clf_map.items()]
+    q1_df = (
+        spark.createDataFrame(q1_rows_py, ["classifier", "predictions"])
+        .orderBy(F.desc("predictions"), F.asc("classifier"))
+    )
+    logging.info("Top-10 classifiers by predictions:")
     q1_df.show(10, truncate=False)
 
-    # Keep Top-5
     top5 = [r["classifier"] for r in q1_df.limit(5).collect()]
-    print(f"🏆 Top-5 classifiers: {', '.join(top5)}")
+    logging.info("Top-5: %s", ", ".join(top5))
 
-    # -------------------------------------------------------------------------
-    # 3.4 Detect ID columns (chr, pos, protein)
-    # -------------------------------------------------------------------------
+    # ---------------- required columns ----------------
     chr_col = find_column(df, ["#chr", "chr"])
     pos_col = find_column(df, ["pos(1-based)", "pos"])
     prot_col = find_column(df, ["Ensembl_proteinid", "proteinid", "protein_id"])
-
     if not chr_col or not pos_col:
-        print("❌ Missing required chromosome or position columns. Exiting.")
+        logging.error("Missing required chr/pos columns; aborting.")
+        df.unpersist()
         spark.stop()
-        sys.exit(1)
+        return 1
 
-    # -------------------------------------------------------------------------
-    # 3.5 Keep Top-5 classifiers + ID columns
-    # -------------------------------------------------------------------------
-    keep_cols = [chr_col, pos_col]
-    if prot_col:
-        keep_cols.append(prot_col)
-    for clf in top5:
-        keep_cols.extend(clf_map[clf])
+    keep_cols: List[str] = [chr_col, pos_col] + ([prot_col] if prot_col else [])
+    for base in top5:
+        keep_cols.extend(clf_map[base])
 
-    df_top = df.select(*keep_cols)
-    print(f"✅ Kept {len(df_top.columns)} columns for analysis")
+    df_top = df.select(*keep_cols).withColumn(
+        "chr_pos", F.concat_ws(":", F.col(chr_col), F.col(pos_col))
+    )
+    logging.info("Created chr_pos key.")
 
-    # -------------------------------------------------------------------------
-    # 3.6 Create chr_pos (Q3)
-    # -------------------------------------------------------------------------
-    df_top = df_top.withColumn("chr_pos", F.concat_ws(":", F.col(chr_col), F.col(pos_col)))
-    print("✅ Created column chr_pos = chr:pos")
-    df_top.select(chr_col, pos_col, "chr_pos").show(5, truncate=False)
-
-    # -------------------------------------------------------------------------
-    # 3.7 Count predictions per row (Q4/Q5)
-    # -------------------------------------------------------------------------
-    pred_cols = [c for c in df_top.columns if c not in [chr_col, pos_col, prot_col, "chr_pos"]]
+    # ---------------- per-row non-missing across predictions ----------------
+    pred_cols = [c for c in df_top.columns if c not in {chr_col, pos_col, "chr_pos", prot_col}]
     df_top = df_top.withColumn(
         "non_missing_count",
-        safe_sum([F.when(~is_missing(c), 1).otherwise(0) for c in pred_cols])
+        safe_sum([F.when(~is_missing(c), 1).otherwise(0) for c in pred_cols]),
     )
 
-    # --- Q4: find position with most predictions ---
+    # ---------------- Q4: position with most predictions ----------------
     pos_summary = (
         df_top.groupBy("chr_pos")
         .agg(F.sum("non_missing_count").alias("total_preds"))
         .orderBy(F.desc("total_preds"))
     )
-    best_pos = pos_summary.limit(1).collect()[0]
-    print(f"⭐ Position with most predictions: {best_pos['chr_pos']} ({best_pos['total_preds']})")
+    best_pos = pos_summary.first()
+    logging.info("Max position: %s (%d)", best_pos["chr_pos"], int(best_pos["total_preds"]))
 
-    # --- Q5: find protein with most predictions ---
+    # ---------------- Q5: protein with most predictions ----------------
     best_prot = None
     if prot_col:
         prot_summary = (
@@ -241,21 +258,22 @@ def main():
             .agg(F.sum("non_missing_count").alias("total_preds"))
             .orderBy(F.desc("total_preds"))
         )
-        best_prot = prot_summary.limit(1).collect()[0]
-        print(f"⭐ Protein with most predictions: {best_prot[prot_col]} ({best_prot['total_preds']})")
+        best_prot = prot_summary.first()
+        logging.info(
+            "Max protein: %s (%d)",
+            best_prot[prot_col],
+            int(best_prot["total_preds"]),
+        )
+    else:
+        logging.info("Protein column not present; skipping Q5.")
 
-    # -------------------------------------------------------------------------
-    # 3.8 Normalize to 3NF tables
-    # -------------------------------------------------------------------------
-    print("🗄️ Normalizing dataset into 3NF tables...")
-
-    # Positions table
+    # ---------------- Normalize to 3NF ----------------
+    logging.info("Normalizing to 3NF ...")
     dim_position = (
         df_top.select(chr_col, pos_col, "chr_pos").distinct()
         .withColumn("position_id", F.monotonically_increasing_id())
     )
 
-    # Proteins table
     dim_protein = None
     if prot_col:
         dim_protein = (
@@ -263,112 +281,103 @@ def main():
             .withColumn("protein_id", F.monotonically_increasing_id())
         )
 
-    # Classifiers table
     dim_classifier = spark.createDataFrame(
-        [(i + 1, clf) for i, clf in enumerate(top5)], ["classifier_id", "classifier_name"]
+        [(i + 1, name) for i, name in enumerate(top5)],
+        ["classifier_id", "classifier_name"],
     )
 
-    # Predictions (unpivoted, long format)
-    base_df = df_top.join(dim_position, on=["chr_pos"], how="inner")
+    base_df = df_top.join(dim_position, on="chr_pos", how="inner")
     if prot_col:
-        base_df = base_df.join(dim_protein, on=[prot_col], how="left")
+        base_df = base_df.join(dim_protein, on=prot_col, how="left")
 
-    # Unpivot predictions: one row per classifier column
-    long_rows = []
+    long_parts: List[DataFrame] = []
     for colname in pred_cols:
-        expr = base_df.select(
-            "position_id",
-            F.lit(colname).alias("column_name"),
-            F.col(colname).alias("value")
-        ).filter(~is_missing(colname))
-        long_rows.append(expr)
+        part = (
+            base_df.select(
+                "position_id",
+                F.lit(colname).alias("column_name"),
+                F.col(colname).alias("value"),
+            )
+            .filter(~is_missing(colname))
+        )
+        long_parts.append(part)
 
-    predictions = long_rows[0]
-    for expr in long_rows[1:]:
-        predictions = predictions.union(expr)
+    if long_parts:
+        predictions = long_parts[0]
+        for part in long_parts[1:]:
+            predictions = predictions.union(part)
+        predictions = (
+            predictions.withColumn(
+                "classifier_name",
+                F.regexp_extract("column_name", r"^(.+?)_(?:score|pred|rankscore|phred)$", 1),
+            )
+            .join(dim_classifier, on="classifier_name", how="inner")
+            .select("position_id", "classifier_id", "column_name", "value")
+        )
+        pred_count = predictions.count()
+    else:
+        predictions = spark.createDataFrame(
+            [], schema="position_id long, classifier_id int, column_name string, value string"
+        )
+        pred_count = 0
 
-    # Add classifier_id
-    predictions = predictions.withColumn(
-        "classifier_name",
-        F.regexp_extract("column_name", r"^(.+?)_(?:score|pred|rankscore|phred)$", 1)
-    ).join(dim_classifier, on="classifier_name", how="inner")\
-     .select("position_id", "classifier_id", "column_name", "value")
+    logging.info("Predictions-long rows: %s", f"{pred_count:,}")
 
-    print(f"✅ Predictions table (unpivoted): {predictions.count():,} rows")
-
-    # -------------------------------------------------------------------------
-    # 3.9 Write to MariaDB (optional)
-    # -------------------------------------------------------------------------
+    # ---------------- Optional DB write ----------------
+    db_status = "Skipped (dry-run)"
     if not args.dry_run and args.db_name:
+        # CLI creds override file creds if provided
         creds = {"user": args.db_user, "password": args.db_pass}
-        creds.update(read_mycnf(os.path.expanduser("~/.my.cnf")))
+        file_creds = read_mycnf(os.path.expanduser("~/.my.cnf"))
+        for key, val in file_creds.items():
+            creds.setdefault(key, val)
 
         url = f"jdbc:mariadb://mariadb.bin.bioinf.nl:3306/{args.db_name}"
         props = {"driver": "org.mariadb.jdbc.Driver", **creds}
 
+        logging.info("Writing tables to MariaDB ...")
         dim_position.write.jdbc(url=url, table="a6_positions", mode="overwrite", properties=props)
-        if dim_protein:
+        if dim_protein is not None:
             dim_protein.write.jdbc(url=url, table="a6_proteins", mode="overwrite", properties=props)
         dim_classifier.write.jdbc(url=url, table="a6_classifiers", mode="overwrite", properties=props)
         predictions.write.jdbc(url=url, table="a6_predictions", mode="overwrite", properties=props)
-        print("💾 Data written to MariaDB successfully.")
-    else:
-        print("⚠️ Dry-run mode: skipping database write.")
+        db_status = "Done"
+        logging.info("Write complete.")
 
-    # -------------------------------------------------------------------------
-    # 3.10 Generate Markdown report
-    # -------------------------------------------------------------------------
-    q1_rows = [
-        (i + 1, r["classifier"], f"{int(r['predictions']):,}")
-        for i, r in enumerate(q1_df.collect())
-    ]
+    # ---------------- Report ----------------
+    q1_rows = [(i + 1, r["classifier"], int(r["predictions"])) for i, r in enumerate(q1_df.collect())]
+    report = (
+        f"# Assignment 6 — Results\n\n"
+        f"**Rows analyzed:** {n_rows:,}  \n"
+        f"**Columns analyzed:** {n_cols}\n\n"
+        f"## Q1 — Predictions per Classifier\n"
+        f"{md_table(['Rank', 'Classifier', 'Predictions'], q1_rows)}\n\n"
+        f"**Top-5 kept:** {', '.join(top5)}\n\n"
+        f"## Q3 — Merged genomic identifier\n"
+        f"`chr_pos = {chr_col}:{pos_col}`  (e.g., `1:69037`)\n\n"
+        f"## Q4 — Position with Most Predictions\n"
+        f"- {best_pos['chr_pos']} ({int(best_pos['total_preds'])} predictions)\n\n"
+        f"## Q5 — Protein with Most Predictions\n"
+        f"- {(best_prot[prot_col] if best_prot else 'N/A')} "
+        f"({(int(best_prot['total_preds']) if best_prot else 'N/A')} predictions)\n\n"
+        f"## Normalization (3NF)\n"
+        f"- **a6_positions:** {dim_position.count():,} unique positions  \n"
+        f"- **a6_proteins:** {dim_protein.count() if dim_protein is not None else 0:,} unique proteins  \n"
+        f"- **a6_classifiers:** {dim_classifier.count():,} classifiers  \n"
+        f"- **a6_predictions:** {pred_count:,} rows  \n"
+        f"- **Database write:** {db_status}\n"
+    )
 
-    report = f"""# Assignment 6 — Results (Final)
+    with open(REPORT_FILE, "w", encoding="utf-8") as f_out:
+        f_out.write(report)
+    logging.info("Saved report: %s", REPORT_FILE)
 
-**Rows analyzed:** {n_rows:,}  
-**Columns analyzed:** {n_cols}
-
-## Q1 — Predictions per Classifier
-{markdown_table(["Rank", "Classifier", "Predictions"], q1_rows)}
-
-**Top-5 kept:** {', '.join(top5)}
-
-## Q3 — Merged genomic identifier
-We created a unique key:
-`chr_pos = {chr_col}:{pos_col}`  
-Example format: `1:69037`
-
-## Q4 — Position with Most Predictions
-- {best_pos['chr_pos']} ({best_pos['total_preds']} predictions)
-
-## Q5 — Protein with Most Predictions
-- {best_prot[prot_col] if best_prot else 'N/A'} ({best_prot['total_preds'] if best_prot else 'N/A'} predictions)
-
-## Normalization (3NF)
-- **a6_positions:** {dim_position.count():,} unique genomic positions  
-- **a6_proteins:** {dim_protein.count() if dim_protein else 0:,} unique proteins  
-- **a6_classifiers:** {dim_classifier.count():,} classifiers  
-- **a6_predictions:** {predictions.count():,} prediction records  
-- **Database write:** {"Done" if not args.dry_run else "Skipped (dry-run)"}
-
-✅ All questions (Q1–Q5) and normalization completed successfully.
-"""
-
-    with open("assignment6.md", "w", encoding="utf-8") as f:
-        f.write(report)
-    print("✅ Markdown report saved as assignment6.md")
-
-    # -------------------------------------------------------------------------
-    # 3.11 Cleanup
-    # -------------------------------------------------------------------------
+    # ---------------- Cleanup ----------------
     df.unpersist()
     spark.stop()
-    print("🎯 Assignment 6 completed successfully!")
+    logging.info("Done.")
+    return 0
 
 
-# =============================================================================
-# Entry point
-# =============================================================================
 if __name__ == "__main__":
-    main()
-
+    raise SystemExit(main())
