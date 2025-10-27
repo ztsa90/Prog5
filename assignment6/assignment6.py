@@ -119,11 +119,46 @@ def discover_classifiers(df: DataFrame) -> Dict[str, List[str]]:
 
 
 def count_non_missing(df: DataFrame, columns: Iterable[str]) -> Dict[str, int]:
-    """Count non-missing values per column, return dict[col] -> count."""
-    aggs = [F.sum(F.when(~is_missing(c), 1).otherwise(0)).alias(c) for c in columns]
+    """
+    Count non-missing (non-null and not in MISSING) values per column.
+    Returns
+    -------
+    Dict[str, int]
+        Dictionary mapping each column name to the number of
+        non-missing (valid) values it contains.
+    Notes
+    -----
+    A value is considered missing if it is:
+      - NULL (Spark null value)
+      - One of the text markers: ".", "", "NA", "nan", "NaN", "null", "NULL"
+    Example
+    -------
+    >>> count_non_missing(df, ["MetaSVM_score", "CADD_raw_rankscore"])
+    {'MetaSVM_score': 1840, 'CADD_raw_rankscore': 1762}
+    """
+
+    # Define all markers that represent missing data in dbNSFP
+    MISSING = {".", "", "NA", "nan", "NaN", "null", "NULL"}
+
+    # Build Spark aggregation expressions:
+    # For each column `c`, count rows where:
+    #   - value is NOT null
+    #   - value is NOT in MISSING set
+    # Each expression is given an alias equal to the column name.
+    aggs = [
+        F.sum(
+            F.when(~(F.col(c).isin(MISSING) | F.col(c).isNull()), 1).otherwise(0)
+        ).alias(c)
+        for c in columns
+    ]
+
+    # Run all aggregations in a single pass over the DataFrame.
+    # This returns one Row object with counts per column.
     row = df.agg(*aggs).collect()[0].asDict()
-    # cast Any to int safely
+
+    # Convert all values to int (Spark returns long/decimal types)
     return {k: int(v) for k, v in row.items()}
+
 
 
 def find_column(df: DataFrame, candidates: Sequence[str]) -> Optional[str]:
