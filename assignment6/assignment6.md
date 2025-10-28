@@ -96,8 +96,8 @@
 - ENSP00000493376;ENSP00000334393 (27111 predictions)
 
 ## Normalization (3NF)
-- **a6_positions:** 729 unique positions  
+- **a6_positions:** 2,000 unique positions  
 - **a6_proteins:** 2 unique proteins  
-- **a6_classifiers:** 5 classifiers  
-- **a6_predictions:** 29,208 rows  
-- **Database write:** Skipped (dry-run)
+- **a6_classifiers:** 76 classifiers  
+- **a6_predictions:** 244,377 rows (before FK join)  
+- **Database write:** DRY RUN — not written
